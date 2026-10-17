@@ -45,6 +45,7 @@ ipykernel==7.4.0          # kernel that runs notebooks inside this environment
 #   pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu132
 torch==2.13.0
 torchvision==0.28.0
+torchaudio==2.11.0
 transformers==5.17.0      # TrOCR and other HF-hosted OCR models
 accelerate==1.15.0        # required by device_map="auto" model loading
 
