@@ -39,7 +39,10 @@ give a 2-3x throughput boost on the many small word-crop images. A batch
 that fails (typically out-of-memory on a large page image) is retried
 one sample at a time, so it costs speed, not samples. Per-sample
 elapsed_s is the batch wall time divided by the batch size -- an
-approximation; the batch size is recorded in run_info.json.
+approximation; the batch size is recorded in run_info.json. Batched
+generation uses left padding (forced on the tokenizer after loading);
+with right padding, pad tokens would land between each row's prompt and
+its response and the response slice would return pad spam.
 
 The default prompt is "OCR this image without additional text" -- change it
 with --prompt if you are exploring prompt sensitivity. --max-new-tokens
@@ -217,6 +220,12 @@ def main() -> None:
 
     print(f"Loading {MODEL_ID} (first run downloads the weights)...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
+    # Batched generation requires LEFT padding. With the right padding some
+    # tokenizers default to, pad tokens land BETWEEN each row's prompt and its
+    # generated text, and slicing the response from the padded length returns
+    # prompt pads instead of the model's answer -- observed as 96% <pad>-only
+    # predictions in a batch_size=64 run.
+    # processor.tokenizer.padding_side = "left"
     model = AutoModelForMultimodalLM.from_pretrained(
         MODEL_ID,
         dtype="auto",
@@ -263,7 +272,7 @@ def main() -> None:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            padding=True,
+            # padding=True,
             add_generation_prompt=True,
         ).to(model.device)
         prompt_len = inputs["input_ids"].shape[-1]
