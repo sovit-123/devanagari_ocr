@@ -112,8 +112,9 @@ def open_predictions(run_dir: Path) -> tuple[Path, set[str]]:
     """Prepare a model's results directory; return (predictions.jsonl, already-done paths).
 
     The predictions file is JSON Lines: one object per sample, appended
-    over time. On startup, existing records are read back so their image
-    paths can be skipped -- an interrupted run resumes where it stopped.
+    over time. On startup, existing records are read back so SUCCESSFUL
+    samples can be skipped -- records carrying an "error" field are NOT
+    counted as done, so failed samples are retried on the next run.
     A truncated final line (a crash mid-write) is tolerated and simply
     redone on the next run.
     """
@@ -127,9 +128,11 @@ def open_predictions(run_dir: Path) -> tuple[Path, set[str]]:
                 if not line:
                     continue
                 try:
-                    done.add(json.loads(line)["image_path"])
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     continue  # truncated tail line from an interrupted run
+                if record.get("error") is None:
+                    done.add(record["image_path"])
     return pred_path, done
 
 

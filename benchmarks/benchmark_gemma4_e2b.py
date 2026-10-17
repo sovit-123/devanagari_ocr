@@ -30,9 +30,16 @@ processor.parse_response() can strip them properly. parse_response returns
 a message dict rather than a plain string, so its text is extracted; the
 raw response is always stored alongside in case parsing ever misbehaves.
 
-This machine has an 8 GB GPU. device_map="auto" fits the E2B model, and
-samples are processed strictly one image at a time; on smaller GPUs,
-accelerate offloads layers to CPU automatically.
+This machine has an 8 GB GPU. device_map="auto" fits the E2B model, and on
+smaller GPUs accelerate offloads layers to CPU automatically. --batch-size
+(default 1) sets how many images share each forward pass: a batch is built
+as a list of conversations, one per sample, padded together -- this
+amortizes the weight reads that dominate on this class of GPU and can
+give a 2-3x throughput boost on the many small word-crop images. A batch
+that fails (typically out-of-memory on a large page image) is retried
+one sample at a time, so it costs speed, not samples. Per-sample
+elapsed_s is the batch wall time divided by the batch size -- an
+approximation; the batch size is recorded in run_info.json.
 
 The default prompt is "OCR this image without additional text" -- change it
 with --prompt if you are exploring prompt sensitivity. --max-new-tokens
@@ -51,15 +58,26 @@ Usage
 -----
     python3 benchmarks/benchmark_gemma4_e2b.py
     python3 benchmarks/benchmark_gemma4_e2b.py --limit 200       # smoke test
+    python3 benchmarks/benchmark_gemma4_e2b.py --batch-size 8    # batched inference
     python3 benchmarks/benchmark_gemma4_e2b.py --max-new-tokens 1024
 """
 
 from __future__ import annotations
 
-import argparse
-import sys
-import time
-from pathlib import Path
+import os
+
+# The model's vision tower allocates multi-GB transients for every image
+# (a fixed 2520-patch representation, regardless of image size). On an
+# 8 GB GPU those repeated large allocations fragment the CUDA caching
+# allocator; expandable_segments avoids exactly that (it is also what
+# PyTorch's own out-of-memory message recommends). Must be set before
+# torch initializes CUDA -- torch is imported later, inside main().
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import argparse  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # Make the project root importable (bench_common and make_splits live there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -148,12 +166,23 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MAX_NEW_TOKENS,
         help="generation cap per sample (default: 512; page-level text may need more)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help=(
+            "number of images per forward pass (default: 1). Batches are padded "
+            "together; a failed batch is retried one sample at a time"
+        ),
+    )
     args = parser.parse_args()
 
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
     if args.max_new_tokens < 1:
         parser.error("--max-new-tokens must be at least 1")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1")
     return args
 
 
@@ -200,6 +229,7 @@ def main() -> None:
             "model_id": MODEL_ID,
             "prompt": args.prompt,
             "max_new_tokens": args.max_new_tokens,
+            "batch_size": args.batch_size,
             "split": "test",
             "data_dir": str(data_dir),
             "samples_selected": len(test_paths),
@@ -211,63 +241,107 @@ def main() -> None:
         },
     )
 
-    consecutive_failures = 0
-    written = 0
-    with open(pred_path, "a", encoding="utf-8") as out_f:
-        for image_path in tqdm(todo, desc="Predicting", unit=" img"):
-            record: dict = {
-                "image_path": image_path,
-                "ground_truth": truth[image_path],
-                "prediction": None,
-                "raw_response": None,
+    # Inner worker: run the model on a chunk of samples -- one conversation
+    # each, padded together -- and return one record per sample. Raises
+    # whole-chunk exceptions (for example out-of-memory) for the caller to
+    # retry sample by sample.
+    def predict_batch(chunk: list[str]) -> list[dict]:
+        messages = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "url": str(data_dir / path)},
+                        {"type": "text", "text": args.prompt},
+                    ],
+                }
+            ]
+            for path in chunk
+        ]
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,
+            add_generation_prompt=True,
+        ).to(model.device)
+        prompt_len = inputs["input_ids"].shape[-1]
+
+        start = time.perf_counter()
+        outputs = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+        elapsed = time.perf_counter() - start
+
+        responses = [
+            processor.decode(outputs[i][prompt_len:], skip_special_tokens=False)
+            for i in range(len(chunk))
+        ]
+        parsed = processor.parse_response(responses, prefix=inputs["input_ids"])
+
+        return [
+            {
+                "image_path": path,
+                "ground_truth": truth[path],
+                "prediction": extract_text(message),
+                "raw_response": response,
+                "elapsed_s": round(elapsed / len(chunk), 3),
                 "error": None,
             }
+            for path, response, message in zip(chunk, responses, parsed)
+        ]
+
+    def error_record(path: str, exc: Exception) -> dict:
+        return {
+            "image_path": path,
+            "ground_truth": truth[path],
+            "prediction": None,
+            "raw_response": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    consecutive_failures = 0
+    written = 0
+    chunks = [todo[i : i + args.batch_size] for i in range(0, len(todo), args.batch_size)]
+    with open(pred_path, "a", encoding="utf-8") as out_f:
+        for chunk in tqdm(
+            chunks,
+            desc="Predicting",
+            unit=" img" if args.batch_size == 1 else " batch",
+        ):
             try:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image", "url": str(data_dir / image_path)},
-                            {"type": "text", "text": args.prompt},
-                        ],
-                    }
-                ]
-                inputs = processor.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                    add_generation_prompt=True,
-                ).to(model.device)
-                prompt_len = inputs["input_ids"].shape[-1]
-
-                start = time.perf_counter()
-                outputs = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
-                elapsed = time.perf_counter() - start
-
-                response = processor.decode(
-                    outputs[0][prompt_len:], skip_special_tokens=False
+                records = predict_batch(chunk)
+            except Exception as exc:  # noqa: BLE001 -- a batch-level failure
+                # (typically out-of-memory, or one poison image) is retried
+                # one sample at a time to isolate the culprit.
+                print(
+                    f"Batch of {len(chunk)} failed ({type(exc).__name__}); "
+                    "retrying its samples individually ..."
                 )
-                record["prediction"] = extract_text(
-                    processor.parse_response(response, prefix=inputs["input_ids"])
-                )
-                record["raw_response"] = response
-                record["elapsed_s"] = round(elapsed, 3)
-                consecutive_failures = 0
-            except Exception as exc:  # noqa: BLE001 -- record the failure, keep going
-                record["error"] = f"{type(exc).__name__}: {exc}"
-                consecutive_failures += 1
-
-            append_prediction(out_f, record)
-            out_f.flush()  # crash-safe: every record is on disk immediately
-            written += 1
-
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                raise SystemExit(
-                    f"{MAX_CONSECUTIVE_FAILURES} samples failed in a row -- something "
-                    "is systematically wrong (auth, prompt format, or out-of-memory). "
-                    "Stopping."
-                )
+                torch.cuda.empty_cache()  # release the failed attempt's reserved memory
+                records = []
+                for path in chunk:
+                    try:
+                        records.extend(predict_batch([path]))
+                    except Exception as exc2:  # noqa: BLE001
+                        records.append(error_record(path, exc2))
+            for record in records:
+                append_prediction(out_f, record)
+                out_f.flush()  # crash-safe: every record is on disk immediately
+                written += 1
+                if record["error"] is None:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        raise SystemExit(
+                            f"{MAX_CONSECUTIVE_FAILURES} samples failed in a row -- something "
+                            "is systematically wrong (auth, prompt format, or out-of-memory). "
+                            "Stopping."
+                        )
+            # The vision tower's multi-GB transients are per-image; freeing
+            # the cached blocks keeps the next batch from fragmenting the
+            # small GPU. Cheap insurance (a few milliseconds per batch).
+            torch.cuda.empty_cache()
 
     print(f"Wrote {written:,} prediction record(s) to {pred_path}")
     print("Next step: score the predictions file with the evaluation script (CER/WER).")
