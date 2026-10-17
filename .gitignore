@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Dataset: everything under input/ is reproducible data, not source code.
+#   - tarballs + extracted images come from download_dataset.py / extract.py
+#   - splits.csv is regenerated deterministically by make_splits.py (seed 42),
+#     and grows whenever more batches are downloaded -- not something to track
+# ---------------------------------------------------------------------------
+input/
+
+# ---------------------------------------------------------------------------
+# Benchmark outputs: predictions and run info are regenerable by re-running
+# the model scripts and can grow to tens of MB per model per test run.
+# ---------------------------------------------------------------------------
+benchmarks/results/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Notebooks (checkpoints that Jupyter scatters next to .ipynb files)
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Editors / OS noise
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# ---------------------------------------------------------------------------
+# Eventual training artifacts (fine-tuning is on the roadmap)
+# ---------------------------------------------------------------------------
+checkpoints/
+runs/
+wandb/
+mlruns/
