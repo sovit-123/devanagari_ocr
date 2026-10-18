@@ -5,13 +5,16 @@ on the val split, saves the LoRA adapter, and ends with a short generation
 demo on validation samples. Training and benchmarking share one runtime, so
 the saved adapter plugs straight into the benchmark harness.
 
-USE_4BIT switches between a 4-bit quantized base (QLoRA, for small GPUs) and
-full-precision bf16. The saved adapter is quantization-agnostic: it loads
-onto either base at any time, and official benchmarks always use the
-unquantized base to stay comparable with the existing pilot run.
+--use-4bit (the default) trains on a 4-bit quantized base (QLoRA), which fits
+small GPUs; --no-use-4bit trains in full bf16 on a bigger one. The saved
+adapter is quantization-agnostic: it loads onto either base at any time, and
+official benchmarks always use the unquantized base to stay comparable with
+the existing pilot run.
 
 Usage:
     python3 training_scripts/gemma4/finetune_hindi_ocr.py
+    python3 training_scripts/gemma4/finetune_hindi_ocr.py --train-samples 64 --val-samples 8 --epochs 1   # smoke test
+    python3 training_scripts/gemma4/finetune_hindi_ocr.py --no-use-4bit --batch-size 16 --grad-accum 2    # big GPU
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import os
 # further below).
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import argparse
 import csv
 import random
 import sys
@@ -40,47 +44,125 @@ from trl import SFTConfig, SFTTrainer  # noqa: E402
 
 from bench_common import DEFAULT_DATA_DIR, collect_ground_truth  # noqa: E402
 
-MODEL_ID = "google/gemma-4-E2B-it"
-DATA_DIR = DEFAULT_DATA_DIR
+def parse_args() -> argparse.Namespace:
+    """Parse and validate the command-line arguments.
 
-# Hindi-only sample selection: image filename prefixes that belong to the
-# Hindi subset of the dataset.
-HINDI_PREFIXES = ("hindi_local", "iiit_hindi", "hindidataocr")
-TRAIN_SAMPLES = 2000         # training images drawn from the train split
-VAL_SAMPLES = 200            # validation images drawn from the val split
-TRAIN_PROMPT = "OCR this image without additional text"
-SEED = 3407
+    Every default lives in its add_argument call and is rendered in --help
+    via argparse's %(default)s, so the flags themselves are the single
+    source of truth for the configuration.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Fine-tune Gemma 4 E2B for Hindi Devanagari OCR with LoRA "
+            "(TRL SFTTrainer, completion-only loss), pure transformers."
+        )
+    )
+    parser.add_argument(
+        "--model-id", default="google/gemma-4-E2B-it", help="base model to fine-tune (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DEFAULT_DATA_DIR,
+        help="dataset directory holding splits.csv (default: input/devanagari_ocr_dataset)",
+    )
+    parser.add_argument(
+        "--hindi-prefixes",
+        nargs="+",
+        default=["hindi_local", "iiit_hindi", "hindidataocr"],
+        help="image filename prefixes that count as Hindi (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--train-samples", type=int, default=2000,
+        help="training images drawn from the train split (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--val-samples", type=int, default=200,
+        help="validation images drawn from the val split (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="OCR this image without additional text",
+        help='transcription prompt (default: "%(default)s")',
+    )
+    parser.add_argument("--seed", type=int, default=3407, help="random seed (default: %(default)s)")
+    parser.add_argument(
+        "--use-4bit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="train on a 4-bit NF4 base (QLoRA, fits 8 GB GPUs); "
+        "--no-use-4bit trains in bf16 (default: %(default)s)",
+    )
+    parser.add_argument("--epochs", type=int, default=3, help="training epochs (default: %(default)s)")
+    parser.add_argument(
+        "--batch-size", type=int, default=1,
+        help="images per forward pass; the vision tower is huge per image (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--eval-batch-size", type=int, default=1,
+        help="images per validation pass (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--grad-accum", type=int, default=32,
+        help="gradient accumulation steps; 32 x 1 = effective batch 32 (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--learning-rate", type=float, default=2e-4,
+        help="optimizer learning rate (default: %(default)s)",
+    )
+    parser.add_argument("--warmup-steps", type=int, default=10, help="LR warmup steps (default: %(default)s)")
+    parser.add_argument("--logging-steps", type=int, default=20, help="log training loss every N steps (default: %(default)s)")
+    parser.add_argument("--eval-steps", type=int, default=50, help="validate every N steps (default: %(default)s)")
+    parser.add_argument("--lora-r", type=int, default=32, help="LoRA rank (default: %(default)s)")
+    parser.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha (default: %(default)s)")
+    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout (default: %(default)s)")
+    parser.add_argument(
+        "--max-length", type=int, default=512,
+        help="max tokens per sample; image tokens alone are ~256 (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "outputs" / "hindi_ocr_lora",
+        help="where the LoRA adapter is saved (default: %(default)s)",
+    )
+    args = parser.parse_args()
 
-USE_4BIT = True              # QLoRA: 4-bit NF4 base, required to fit an 8 GB GPU
+    for name in (
+        "train_samples",
+        "val_samples",
+        "epochs",
+        "batch_size",
+        "eval_batch_size",
+        "grad_accum",
+        "warmup_steps",
+        "logging_steps",
+        "eval_steps",
+        "lora_r",
+        "lora_alpha",
+        "max_length",
+    ):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be at least 1")
+    if args.learning_rate <= 0:
+        parser.error("--learning-rate must be positive")
+    if not 0 <= args.lora_dropout < 1:
+        parser.error("--lora-dropout must be between 0 and 1")
+    return args
 
-EPOCHS = 3
-BATCH_SIZE = 1               # one image per step; the vision tower is huge per image
-EVAL_BATCH_SIZE = 1
-GRAD_ACCUM = 32             # 32 x 1 = effective batch 32, same as the 16 x 2 L40S setup
-LEARNING_RATE = 2e-4
-WARMUP_STEPS = 10
-LOGGING_STEPS = 20
-EVAL_STEPS = 50
-LORA_R = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.05
-MAX_LENGTH = 512
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "hindi_ocr_lora"
-
-
-def select_samples(split: str, limit: int) -> list[str]:
+def select_samples(args, split: str, limit: int) -> list[str]:
     """Return `limit` Hindi image paths from the given split, seed-shuffled."""
     paths = []
-    with open(DATA_DIR / "splits.csv", newline="", encoding="utf-8") as f:
+    with open(args.data_dir / "splits.csv", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row["split"] == split and Path(row["image_path"]).name.startswith(HINDI_PREFIXES):
+            if row["split"] == split and Path(row["image_path"]).name.startswith(tuple(args.hindi_prefixes)):
                 paths.append(row["image_path"])
-    random.Random(SEED).shuffle(paths)
+    random.Random(args.seed).shuffle(paths)
     return paths[:limit]
 
 
-def to_prompt_completion(image_path: str, ground_truth: str) -> dict:
+def to_prompt_completion(args, image_path: str, ground_truth: str) -> dict:
     """Build one sample in TRL's prompt/completion format: image + prompt in,
     transcription out. completion_only_loss then trains the model only on the
     transcription."""
@@ -89,8 +171,8 @@ def to_prompt_completion(image_path: str, ground_truth: str) -> dict:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": str(DATA_DIR / image_path)},
-                    {"type": "text", "text": TRAIN_PROMPT},
+                    {"type": "image", "image": str(args.data_dir / image_path)},
+                    {"type": "text", "text": args.prompt},
                 ],
             }
         ],
@@ -103,12 +185,12 @@ def to_prompt_completion(image_path: str, ground_truth: str) -> dict:
     }
 
 
-def build_dataset(image_paths: list[str], truth: dict[str, str]) -> Dataset:
+def build_dataset(args, image_paths: list[str], truth: dict[str, str]) -> Dataset:
     """Turn image paths into an HF dataset of prompt/completion samples."""
-    return Dataset.from_list([to_prompt_completion(p, truth[p]) for p in image_paths])
+    return Dataset.from_list([to_prompt_completion(args, p, truth[p]) for p in image_paths])
 
 
-def demo(model, processor, image_paths: list[str], truth: dict[str, str]) -> None:
+def demo(args, model, processor, image_paths: list[str], truth: dict[str, str]) -> None:
     """Generate on a few validation samples: ground truth vs. fine-tuned model."""
     model.eval()
     for path in image_paths:
@@ -116,8 +198,8 @@ def demo(model, processor, image_paths: list[str], truth: dict[str, str]) -> Non
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "url": str(DATA_DIR / path)},
-                    {"type": "text", "text": TRAIN_PROMPT},
+                    {"type": "image", "image": str(args.data_dir / path)},
+                    {"type": "text", "text": args.prompt},
                 ],
             }
         ]
@@ -134,21 +216,51 @@ def demo(model, processor, image_paths: list[str], truth: dict[str, str]) -> Non
         print(f"{path}\n  gt  : {truth[path]}\n  pred: {prediction}\n")
 
 
+def print_config(args) -> None:
+    """Echo the whole run configuration before anything heavy starts, so the
+    user can see every decision the flags resolved to."""
+    quantization = "4-bit NF4 (QLoRA)" if args.use_4bit else "bf16 (LoRA)"
+    line = "-" * 64
+    print(line)
+    print("Fine-tuning Gemma 4 E2B for Hindi Devanagari OCR")
+    print(line)
+    print(f"Model          : {args.model_id}")
+    print(f"Precision      : {quantization}")
+    print(f"Data dir       : {args.data_dir}")
+    print(f"Hindi prefixes : {', '.join(args.hindi_prefixes)}")
+    print(f"Samples        : {args.train_samples} train / {args.val_samples} val (seed {args.seed})")
+    print(f"Prompt         : \"{args.prompt}\"")
+    print(f"Schedule       : {args.epochs} epochs, lr {args.learning_rate}, linear decay, "
+          f"{args.warmup_steps} warmup steps")
+    print(f"Batching       : {args.batch_size} per step x {args.grad_accum} accumulation "
+          f"= effective {args.batch_size * args.grad_accum}")
+    print(f"LoRA           : r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}, all-linear")
+    print(f"Max length     : {args.max_length} tokens")
+    print(f"Optimizer      : paged AdamW 8-bit, weight decay 0.01")
+    print(f"Logging        : every {args.logging_steps} steps; validation every {args.eval_steps} steps")
+    print(f"Adapter output : {args.output_dir}")
+    print(line)
+    print()
+
+
 def main() -> None:
+    args = parse_args()
+    print_config(args)
+
     # --- Data preparation ---
-    train_paths = select_samples("train", TRAIN_SAMPLES)
-    val_paths = select_samples("val", VAL_SAMPLES)
+    train_paths = select_samples(args, "train", args.train_samples)
+    val_paths = select_samples(args, "val", args.val_samples)
     print(f"Selected {len(train_paths)} training and {len(val_paths)} validation samples.")
 
     print("Streaming annotations for ground truth ...")
-    truth = collect_ground_truth(DATA_DIR, train_paths + val_paths)
-    train_dataset = build_dataset(train_paths, truth)
-    val_dataset = build_dataset(val_paths, truth)
+    truth = collect_ground_truth(args.data_dir, train_paths + val_paths)
+    train_dataset = build_dataset(args, train_paths, truth)
+    val_dataset = build_dataset(args, val_paths, truth)
 
     # --- Model preparation ---
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    processor = AutoProcessor.from_pretrained(args.model_id)
     model_kwargs = {"device_map": "auto"}
-    if USE_4BIT:
+    if args.use_4bit:
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -157,40 +269,40 @@ def main() -> None:
     else:
         model_kwargs["dtype"] = torch.bfloat16
 
-    model = AutoModelForMultimodalLM.from_pretrained(MODEL_ID, **model_kwargs)
+    model = AutoModelForMultimodalLM.from_pretrained(args.model_id, **model_kwargs)
     model.config.use_cache = False
 
     lora_config = LoraConfig(
-        r=LORA_R,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules="all-linear",
     )
 
     training_args = SFTConfig(
-        output_dir=str(OUTPUT_DIR),
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=EVAL_BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
-        learning_rate=LEARNING_RATE,
+        output_dir=str(args.output_dir),
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.grad_accum,
+        learning_rate=args.learning_rate,
         weight_decay=0.01,
         lr_scheduler_type="linear",
-        warmup_steps=WARMUP_STEPS,
-        num_train_epochs=EPOCHS,
-        logging_steps=LOGGING_STEPS,
+        warmup_steps=args.warmup_steps,
+        num_train_epochs=args.epochs,
+        logging_steps=args.logging_steps,
         eval_strategy="steps",
-        eval_steps=EVAL_STEPS,
+        eval_steps=args.eval_steps,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         bf16=True,
-        max_length=MAX_LENGTH,
+        max_length=args.max_length,
         packing=False,
         completion_only_loss=True,
         remove_unused_columns=False,
         optim="paged_adamw_8bit",
-        seed=SEED,
+        seed=args.seed,
         report_to="none",
     )
 
@@ -211,12 +323,12 @@ def main() -> None:
     trainer.model.config.use_cache = True
 
     # --- Save the adapter ---
-    trainer.model.save_pretrained(OUTPUT_DIR)
-    processor.save_pretrained(OUTPUT_DIR)
-    print(f"Saved LoRA adapter to {OUTPUT_DIR}")
+    trainer.model.save_pretrained(str(args.output_dir))
+    processor.save_pretrained(str(args.output_dir))
+    print(f"Saved LoRA adapter to {args.output_dir}")
 
     # --- A short look at the fine-tuned model ---
-    demo(trainer.model, processor, val_paths[:3], truth)
+    demo(args, trainer.model, processor, val_paths[:3], truth)
 
 
 if __name__ == "__main__":
