@@ -35,8 +35,10 @@ venv/
 *.swp
 
 # ---------------------------------------------------------------------------
-# Eventual training artifacts (fine-tuning is on the roadmap)
+# Training artifacts: LoRA adapters and other outputs written by the training
+# scripts are multi-100MB weights -- they stay out of git.
 # ---------------------------------------------------------------------------
+training_scripts/*/outputs/
 checkpoints/
 runs/
 wandb/

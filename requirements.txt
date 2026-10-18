@@ -50,6 +50,13 @@ transformers==5.17.0      # TrOCR and other HF-hosted OCR models
 accelerate==1.15.0        # required by device_map="auto" model loading
 
 # ---------------------------------------------------------------------------
+# Fine-tuning (LoRA/QLoRA, pure transformers stack)
+# ---------------------------------------------------------------------------
+trl==1.16.0               # SFTTrainer: supervised fine-tuning with completion-only loss
+peft==0.21.2              # LoRA adapters
+bitsandbytes==0.50.2      # 4-bit NF4 quantization (USE_4BIT) and paged 8-bit AdamW
+
+# ---------------------------------------------------------------------------
 # Per-benchmark extras -- add each one here when its notebook lands.
 # Kept out until then: they pull heavy or conflicting dependencies.
 # ---------------------------------------------------------------------------
