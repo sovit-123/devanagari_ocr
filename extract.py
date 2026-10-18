@@ -1,46 +1,14 @@
-"""Extract Devanagari OCR image tarballs -- the step between downloading and splitting.
+"""Extract downloaded Devanagari OCR image tarballs into the combined images directory.
 
-Why a separate script
----------------------
-Downloading and extracting are deliberately decoupled. Downloads are
-network-bound and idempotent, so it is reasonable to fetch many batches
-at once and keep them compressed on disk; extraction doubles disk usage
-and is only worth doing for the batches you actually want to split,
-train, or benchmark on right now. This split also lets you delete
-tarballs later (the marker files remember what was extracted) or
-re-extract with --force if an image ever needs rebuilding.
+Tarballs are unpacked flat into <data-dir>/devanagari_ocr/, which is
+exactly where the annotations point, so all extracted batches share one
+namespace. Every completed batch leaves a marker file behind, so
+re-running only extracts what is missing; --force re-extracts selected
+batches anyway. Requesting a batch that was never downloaded prints a
+warning and exits with code 1 while still extracting the rest.
 
-What it does
-------------
-Unpacks image tarballs from <data-dir>/data/ into the single combined
-directory <data-dir>/devanagari_ocr/. The tarballs contain flat image
-files (e.g. hindi_local_1285138.png), and the annotations reference them
-as "devanagari_ocr/<filename>" relative to the data directory -- so every
-member lands directly in that directory under its own basename, and all
-extracted batches share the one flat namespace the annotations expect.
-
-Idempotency
------------
-Each fully extracted tarball leaves a marker file
-(.extracted_images_batch_NNN) inside the images directory. Re-running the
-script extracts only what is missing and never redoes a completed batch.
-An interrupted extraction leaves no marker, so that batch is simply
-unpacked again on the next run. --force ignores the markers and re-extracts
-every selected tarball, overwriting files in place.
-
-Selection
----------
-With no --batches flag, every tarball currently present in <data-dir>/data/
-is selected ("everything I have downloaded"). With --batches, only the
-named tarballs are processed; the SPEC syntax matches download_dataset.py
-(comma-separated numbers and ranges, e.g. 5 or 1-3 or 1,4,9-12). Asking
-for a batch that was never downloaded prints a warning and makes the
-script exit with code 1, so wrapper scripts can notice -- while still
-extracting everything else that was found.
-
-Usage
------
-    python3 extract.py                    # extract every downloaded tarball
+Usage:
+    python3 extract.py                    # every tarball already downloaded
     python3 extract.py --batches 1-3      # extract only these batches
     python3 extract.py --dry-run          # show the plan, change nothing
     python3 extract.py --force           # re-extract, ignoring markers

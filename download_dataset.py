@@ -1,67 +1,19 @@
-"""Download the Devanagari OCR dataset from Hugging Face -- all of it, or just a slice.
+"""Download the Devanagari OCR dataset from Hugging Face -- all of it, or a slice.
 
-The dataset (himalaya-ai/devanagari_ocr_dataset, ~60 GB in total) is stored
-as plain files rather than a streaming-ready dataset:
+The dataset (himalaya-ai/devanagari_ocr_dataset, ~60 GB) is 42 image
+tarballs plus one ~2.1 GB annotations file. Since the annotations are a
+single monolithic file, the smallest useful slice is either the
+annotations alone or the annotations plus whole tarballs -- individual
+languages, domains, or images cannot be fetched separately.
 
-  - data/images_batch_001.tar.gz ... data/images_batch_042.tar.gz
-        42 compressed tarballs of images. Batches 001-041 hold ~1.4 GB
-        each and batch 042 holds ~0.34 GB (~58 GB combined).
-  - devanagari_ocr.json
-        A single annotation file (~2.1 GB) containing every sample: one
-        chat-style "messages" conversation (the user asks for the Devanagari
-        transcription, the assistant reply holds the ground-truth text) and
-        an "images" list with paths like "devanagari_ocr/nepali_0.png".
-        Note that this is the format the file ACTUALLY uses; the dataset
-        card describes an older ShareGPT-style schema that no longer
-        matches the data.
-  - README.md
-        The dataset card.
+The script only downloads; extract.py unpacks, so you can fetch many
+batches but unpack only the few you want. Downloads are idempotent:
+re-running a command re-downloads nothing. Add --dry-run to preview.
 
-Because the annotations live in one monolithic file and the images are
-packed into opaque tarballs, the smallest useful slice you can download is
-either the annotations alone, or the annotations plus one or more whole
-tarballs. It is not possible to download only one language, one domain
-(say, handwriting), or individual images.
-
-This script only DOWNLOADS; it does not extract anything. Extraction is
-deliberately a separate step (extract.py) so you can fetch many batches at
-once but unpack only the few you want to split, train, or benchmark on --
-tarballs stay compressed on disk until you decide otherwise. Downloads are
-idempotent: snapshot_download() verifies files it has already fetched, so
-re-running the same command re-downloads nothing.
-
-This script supports three modes:
-
-  1. Download everything (the default):
-
-         python3 download_dataset.py
-
-     Fetches all 42 tarballs plus the annotations (~60 GB).
-
-  2. Download only the annotations:
-
-         python3 download_dataset.py --only-annotations
-
-     Fetches just devanagari_ocr.json and README.md (~2.1 GB).
-
-  3. Download the annotations plus selected batches:
-
-         python3 download_dataset.py --batches 1-3,7
-
-     --batches accepts comma-separated numbers and ranges (for example
-     "5", "1-3", or "1,4,9-12"); each batch adds roughly 1.4 GB. The
-     annotations are always included, since image tarballs are of little
-     use without them.
-
-Typical workflow across the three scripts:
-
-    python3 download_dataset.py --batches 1-5   # fetch (network-bound)
-    python3 extract.py --batches 1-2            # unpack a few (disk-bound)
-    python3 make_splits.py                      # split what is unpacked
-
-Add --dry-run to any command to print the files that would be fetched,
-without downloading anything. The repository is public, so no Hugging
-Face login or token is required.
+Usage:
+    python3 download_dataset.py                    # everything (~60 GB)
+    python3 download_dataset.py --only-annotations # just the ~2.1 GB annotations
+    python3 download_dataset.py --batches 1-3,7   # annotations + chosen batches
 """
 
 from __future__ import annotations

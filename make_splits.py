@@ -1,59 +1,17 @@
-"""Create reproducible train/val/test splits over the Devanagari OCR samples that are on disk.
+"""Create a reproducible train/val/test split over the Devanagari OCR samples on disk.
 
-Why split at all
-----------------
-The dataset ships with no predefined train/validation/test split, and the
-annotations file (devanagari_ocr.json, ~2.1 GB) is the fixed, authoritative
-universe of samples. We always split -- even when only one image batch has
-been downloaded -- so that every benchmark run, pilot or full, reports
-against a dedicated test set rather than "whatever happens to be lying
-around". Benchmark notebooks read this script's output and evaluate only
-on its "test" rows.
+The split covers exactly the samples whose images are present: the
+~2.1 GB annotations are streamed once (with a progress bar) and every
+single-image record whose file exists under the data directory becomes a
+candidate. Candidates are sorted, shuffled with the seed (default 42),
+and sliced 80/10/10 into test, validation, and train, written to
+<data-dir>/splits.csv. Benchmarks score only the test rows.
 
-How samples are chosen
----------------------
-The script streams the annotations file (never loading all ~2.1 GB into
-memory at once) and collects every sample whose image file exists under
-the data directory. A byte-based progress bar shows how far the scan has
-made it through the file -- streaming ~2.1 GB takes a couple of minutes,
-and it should never happen in the dark. Image paths such as "devanagari_ocr/nepali_0.png" are
-relative to the data directory, and extract.py unpacks the tarballs flat
-into exactly that layout. Only downloaded-and-extracted samples enter the
-split -- the split covers "as many files as there are in the directory".
+Because a split reshuffles whenever more batches have arrived, overwriting
+an existing splits.csv requires --force -- a deliberate rebase that makes
+older test numbers incomparable.
 
-Records that reference several images, or none, are skipped and counted
-separately: this benchmark is one image -> one transcription, and records
-with multiple images do not fit that shape.
-
-Reproducibility
----------------
-The candidate list is sorted deterministically, shuffled with
-random.Random(seed) (default 42, matching the dataset card's advice), then
-sliced: the first slice becomes test, the second validation, the rest
-train. Same seed + same candidate set + same Python = the identical split.
-
-Regeneration warning
---------------------
-Once more batches are downloaded, re-running this script splits the
-LARGER set, and the shuffle runs again over it -- so samples get
-reassigned between splits. Test numbers measured under an older split
-then stop being comparable to numbers from the new one. For that reason
-the script refuses to overwrite an existing splits.csv unless you pass
---force, which records that you are deliberately rebasing the split.
-
-Output
-------
-Writes <data-dir>/splits.csv: a header row, then one row per sample:
-
-    image_path,split
-    devanagari_ocr/nepali_0.png,test
-    ...
-
-image_path is exactly the string found in the annotation record's
-"images" list, so notebooks can join it back to the ground truth.
-
-Usage
------
+Usage:
     python3 make_splits.py                    # seed 42, 80/10/10, default data dir
     python3 make_splits.py --force            # regenerate an existing split deliberately
     python3 make_splits.py --seed 7 --val-fraction 0.05 --test-fraction 0.05

@@ -1,27 +1,12 @@
-"""Shared machinery for the model benchmark scripts in benchmarks/.
+"""Shared machinery for the benchmark scripts in benchmarks/.
 
-Every benchmark -- whatever the model -- needs the same three things:
-
-  1. the test split: the only samples that may be scored,
-  2. the ground-truth transcriptions for those samples, and
-  3. an append-only, resumable predictions file for the model's outputs.
-
-That logic lives here, once, so every model is benchmarked through
-identical code paths. A benchmark script adds the project root to
-sys.path and imports from this module; it never re-implements these steps.
-
-Where the pieces come from:
-
-  - the test split is read from <data-dir>/splits.csv (written by
-    make_splits.py; only its "test" rows are used),
-  - ground truth is streamed from devanagari_ocr.json (~2.1 GB, through
-    the memory-light parser in make_splits.py). Each annotation record
-    holds a chat-style conversation whose assistant message is the
-    transcription, and references exactly one image,
-  - predictions are written one JSON object per line into
-    benchmarks/results/<model>/predictions.jsonl. The file is appended
-    across runs: records already present are skipped, so an interrupted
-    benchmark resumes instead of starting over.
+Every benchmark needs the same three things -- the test split, the
+ground-truth transcriptions for its samples, and a resumable predictions
+file -- and that logic lives here once, so all models run through
+identical code. Ground truth is streamed from the ~2.1 GB annotations
+file; predictions are appended one JSON object per line, and samples
+already recorded are skipped on restart, so interrupted runs resume
+instead of starting over.
 """
 
 from __future__ import annotations

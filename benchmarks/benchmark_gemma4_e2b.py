@@ -1,64 +1,17 @@
 """Benchmark Google Gemma 4 E2B (google/gemma-4-E2B-it) on the Devanagari OCR test split.
 
-What this script does
----------------------
-Runs the multimodal Gemma model over the samples of the test split in
-<data-dir>/splits.csv and appends one prediction record per sample to
-benchmarks/results/gemma4_e2b/predictions.jsonl. Each record carries the
-sample's image path, its ground-truth transcription, the model's parsed
-prediction, the raw generated response (for debugging), the inference wall
-time, or -- if the sample failed -- an "error" field.
+Runs the model over the test rows of <data-dir>/splits.csv and appends one
+record per sample to benchmarks/results/gemma4_e2b/predictions.jsonl:
+image path, ground truth, prediction, raw response, and timing, or an
+"error" field if the sample failed.
 
-What it deliberately does NOT do
---------------------------------
-Compute CER/WER. Scoring is a separate step, so that every model is judged
-by one shared evaluation with a single normalization protocol; numbers
-computed ad-hoc inside each benchmark would not be comparable across
-models. After a run, the evaluation script consumes the predictions file.
+The script never computes metrics -- scoring is evaluate.py's job, so every
+model is judged by the same protocol. Records are flushed after every
+sample and completed samples are skipped on restart. The model repository
+is gated: accept its license on the Hugging Face website and log in
+(hf auth login) before the first run downloads the weights.
 
-Model specifics
----------------
-google/gemma-4-E2B-it is a gated repository: you must accept its license
-on the Hugging Face website and log in (hf auth login) before the first
-run can download the multi-GB weights. (The local hub cache currently
-holds only config stubs -- the download happens on first run.)
-
-The inference pattern follows the official usage: the image goes through
-processor.apply_chat_template() before the text prompt, generation is
-greedy, and the response is decoded with special tokens KEPT so that
-processor.parse_response() can strip them properly. parse_response returns
-a message dict rather than a plain string, so its text is extracted; the
-raw response is always stored alongside in case parsing ever misbehaves.
-
-This machine has an 8 GB GPU. device_map="auto" fits the E2B model, and on
-smaller GPUs accelerate offloads layers to CPU automatically. --batch-size
-(default 1) sets how many images share each forward pass: a batch is built
-as a list of conversations, one per sample, padded together -- this
-amortizes the weight reads that dominate on this class of GPU and can
-give a 2-3x throughput boost on the many small word-crop images. A batch
-that fails (typically out-of-memory on a large page image) is retried
-one sample at a time, so it costs speed, not samples. Per-sample
-elapsed_s is the batch wall time divided by the batch size -- an
-approximation; the batch size is recorded in run_info.json. Batched
-generation uses left padding (forced on the tokenizer after loading);
-with right padding, pad tokens would land between each row's prompt and
-its response and the response slice would return pad spam.
-
-The default prompt is "OCR this image without additional text" -- change it
-with --prompt if you are exploring prompt sensitivity. --max-new-tokens
-defaults to 512 per the official example; page-level samples with long
-text may need more.
-
-Crash safety and resuming
--------------------------
-Predictions are flushed to disk after every sample, and records already
-present in the file are skipped on restart, so interrupted runs resume
-where they stopped. A sample that raises is recorded with an "error" field
-and the run continues; but if several samples fail in a row at the start,
-the script stops instead of writing error records for the whole split.
-
-Usage
------
+Usage:
     python3 benchmarks/benchmark_gemma4_e2b.py
     python3 benchmarks/benchmark_gemma4_e2b.py --limit 200       # smoke test
     python3 benchmarks/benchmark_gemma4_e2b.py --batch-size 8    # batched inference
@@ -85,9 +38,9 @@ from pathlib import Path  # noqa: E402
 # Make the project root importable (bench_common and make_splits live there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tqdm import tqdm  # noqa: E402
+from tqdm import tqdm
 
-from bench_common import (  # noqa: E402
+from bench_common import (
     DEFAULT_DATA_DIR,
     RESULTS_DIR,
     append_prediction,

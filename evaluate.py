@@ -1,60 +1,20 @@
 """Score benchmark predictions -- the one evaluation step shared by every model.
 
-Why a single script
---------------------
-Benchmark scripts only record what a model said (one JSONL record per
-sample). Turning those records into numbers happens here, once, so that
-every model is scored by byte-identical code with one normalization
-protocol. Numbers produced ad-hoc inside each benchmark would not be
-comparable across models, and when the protocol evolves, stored
-predictions can be re-scored without re-running any GPU time.
+Benchmarks only record what a model said; the numbers happen here, so every
+model is scored by identical code. Ground truth and prediction are both
+normalized the same way (Unicode NFC, then whitespace collapse), and rates
+are reported as percentages: grapheme-cluster CER as the headline
+(Devanagari conjuncts count as one unit), codepoint CER, WER, and exact
+match -- each micro (corpus-weighted) and macro (per-sample mean).
+Results break down by filename prefix (nepali_, hindi_local_, ...), list
+the worst samples for quick error analysis, and a metrics.json is archived
+next to the predictions file. Failed samples are counted as errors and kept
+out of the averages, so model failures stay visible.
 
-The normalization protocol
---------------------------
-Applied identically to ground truth and prediction, for every model:
-  1. Unicode NFC normalization -- Devanagari has canonically equivalent
-     spellings (e.g. ड़ as one codepoint or ड + nukta), and measuring
-     encoding differences instead of recognition quality would be nonsense.
-  2. Whitespace collapsed to single spaces, leading/trailing stripped.
-
-Metrics
--------
-All rates are reported as percentages.
-  - Grapheme CER (the headline number): edit distance over grapheme
-    clusters (the `regex` module's \\X, so conjuncts like क्ष count as one
-    unit), divided by the ground-truth length.
-  - Codepoint CER: the same over raw Unicode codepoints -- the classic,
-    naive definition; kept for comparability with published numbers.
-  - WER: the same over whitespace-separated words.
-  - Exact Match: fraction of samples whose normalized strings are equal.
-Each CER/WER comes in two flavors:
-  - micro (corpus-level): total distance / total ground-truth length --
-    long pages weigh more than single words;
-  - macro (per-sample mean): every sample weighs the same.
-
-Samples whose ground truth is empty after normalization are excluded from
-CER/WER (the rate is undefined) but counted. Records carrying an "error"
-field are counted as inference errors and excluded from the metrics -- the
-error rate is printed alongside, so model failures stay visible instead
-of silently distorting the averages.
-
-Breakdowns
-----------
-The dataset's filename prefixes (nepali_, hindi_local_, hindidataocr_, ...)
-act as pseudo-domain labels: metrics are reported per prefix, plus the
-worst-scoring samples for quick error analysis.
-
-Distances come from rapidfuzz (one implementation everywhere -- no
-mixed-library inconsistencies; jiwer stays available for cross-checking).
-
-Usage
------
+Usage:
     python3 evaluate.py                                  # score every model under benchmarks/results/
     python3 evaluate.py benchmarks/results/gemma4_e2b   # one model, detailed view
     python3 evaluate.py path/a.jsonl path/b.jsonl        # explicit files
-
-For each scored run, a metrics.json is written next to the predictions
-file, archiving the numbers with their configuration.
 """
 
 from __future__ import annotations
