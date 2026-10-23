@@ -1,0 +1,11 @@
+# Requirements for bench_gemma4_e2b_hf.py (pure transformers inference).
+# Standalone-complete: install this file alone into a fresh environment.
+#
+# PyTorch with CUDA is already installed here as 2.13.0+cu132. On a fresh
+# machine, install it from the PyTorch wheel index (not PyPI), e.g.:
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu132
+torch==2.13.0
+transformers==5.17.0      # AutoModelForMultimodalLM + AutoProcessor
+accelerate==1.15.0        # device_map="auto" model loading
+peft==0.21.2              # --finetuned: LoRA adapter loading
+pillow==12.3.0            # image decoding

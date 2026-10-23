@@ -1,9 +1,9 @@
 """Benchmark Google Gemma 4 E2B (google/gemma-4-E2B-it) on the Devanagari OCR test split.
 
 Runs the model over the test rows of <data-dir>/splits.csv and appends one
-record per sample to benchmarks/results/gemma4_e2b/predictions.jsonl:
-image path, ground truth, prediction, raw response, and timing, or an
-"error" field if the sample failed.
+record per sample to results/<run-name>/predictions.jsonl inside this
+script's directory: image path, ground truth, prediction, raw response,
+and timing, or an "error" field if the sample failed.
 
 The script never computes metrics -- scoring is evaluate.py's job, so every
 model is judged by the same protocol. Records are flushed after every
@@ -11,11 +11,16 @@ sample and completed samples are skipped on restart. The model repository
 is gated: accept its license on the Hugging Face website and log in
 (hf auth login) before the first run downloads the weights.
 
+--finetuned PATH loads either a LoRA/QLoRA adapter (mounted on the
+unquantized base model) or a fully fine-tuned model directory; --run-name
+names the results directory and is required whenever --finetuned is given.
+Benchmarks always run the unquantized base to stay comparable.
+
 Usage:
-    python3 benchmarks/benchmark_gemma4_e2b.py
-    python3 benchmarks/benchmark_gemma4_e2b.py --limit 200       # smoke test
-    python3 benchmarks/benchmark_gemma4_e2b.py --batch-size 8    # batched inference
-    python3 benchmarks/benchmark_gemma4_e2b.py --max-new-tokens 1024
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --limit 200     # smoke test
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --batch-size 8  # batched inference
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --finetuned <dir> --run-name <name>
 """
 
 from __future__ import annotations
@@ -36,13 +41,12 @@ import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 # Make the project root importable (bench_common and make_splits live there).
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tqdm import tqdm
 
 from bench_common import (
     DEFAULT_DATA_DIR,
-    RESULTS_DIR,
     append_prediction,
     collect_ground_truth,
     load_test_split,
@@ -51,7 +55,7 @@ from bench_common import (
 )
 
 MODEL_ID = "google/gemma-4-E2B-it"
-RUN_NAME = "gemma4_e2b"
+DEFAULT_RUN_NAME = "gemma4_e2b_hf"
 DEFAULT_PROMPT = "OCR this image without additional text"
 DEFAULT_MAX_NEW_TOKENS = 512
 
@@ -131,6 +135,23 @@ def parse_args() -> argparse.Namespace:
             "together; a failed batch is retried one sample at a time"
         ),
     )
+    parser.add_argument(
+        "--finetuned",
+        type=Path,
+        default=None,
+        help=(
+            "path to a LoRA/QLoRA adapter directory or a fully fine-tuned model "
+            "directory; by default the plain base model is benchmarked"
+        ),
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help=(
+            "name of the results directory inside this script's folder "
+            f'(default for plain runs: "{DEFAULT_RUN_NAME}"; required with --finetuned)'
+        ),
+    )
     args = parser.parse_args()
 
     if args.limit is not None and args.limit < 1:
@@ -139,6 +160,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-new-tokens must be at least 1")
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
+    if args.finetuned is not None and args.run_name is None:
+        parser.error("--run-name is required when --finetuned is given")
+    if args.finetuned is not None and not args.finetuned.is_dir():
+        parser.error(f"--finetuned path does not exist: {args.finetuned}")
+    if args.run_name is None:
+        args.run_name = DEFAULT_RUN_NAME
     return args
 
 
@@ -156,8 +183,9 @@ def main() -> None:
     print("Streaming annotations for ground truth ...")
     truth = collect_ground_truth(data_dir, test_paths)
 
-    # 3. Resumable predictions file.
-    run_dir = RESULTS_DIR / RUN_NAME
+    # 3. Resumable predictions file, inside this script's own directory.
+    results_root = Path(__file__).resolve().parent / "results"
+    run_dir = results_root / args.run_name
     pred_path, done = open_predictions(run_dir)
     todo = [p for p in test_paths if p in truth and p not in done]
     print(f"Predictions file: {pred_path}")
@@ -185,10 +213,32 @@ def main() -> None:
         device_map="auto",
     )
 
+    if args.finetuned is not None:
+        if (args.finetuned / "adapter_config.json").exists():
+            from peft import PeftModel  # noqa: E402
+
+            print(f"Mounting LoRA adapter from {args.finetuned}")
+            model = PeftModel.from_pretrained(model, args.finetuned)
+        elif (args.finetuned / "config.json").exists():
+            print(f"Loading fine-tuned model from {args.finetuned}")
+            processor = AutoProcessor.from_pretrained(args.finetuned)
+            model = AutoModelForMultimodalLM.from_pretrained(
+                args.finetuned,
+                dtype="auto",
+                device_map="auto",
+            )
+        else:
+            raise SystemExit(
+                f"{args.finetuned} is neither an adapter (no adapter_config.json) "
+                "nor a model directory (no config.json)."
+            )
+
     write_run_info(
         run_dir,
         {
             "model_id": MODEL_ID,
+            "run_name": args.run_name,
+            "finetuned": str(args.finetuned) if args.finetuned is not None else None,
             "prompt": args.prompt,
             "max_new_tokens": args.max_new_tokens,
             "batch_size": args.batch_size,

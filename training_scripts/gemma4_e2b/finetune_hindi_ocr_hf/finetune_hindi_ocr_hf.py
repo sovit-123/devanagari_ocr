@@ -12,9 +12,9 @@ official benchmarks always use the unquantized base to stay comparable with
 the existing pilot run.
 
 Usage:
-    python3 training_scripts/gemma4/finetune_hindi_ocr.py
-    python3 training_scripts/gemma4/finetune_hindi_ocr.py --train-samples 64 --val-samples 8 --epochs 1   # smoke test
-    python3 training_scripts/gemma4/finetune_hindi_ocr.py --no-use-4bit --batch-size 16 --grad-accum 2    # big GPU
+    python3 training_scripts/gemma4_e2b/finetune_hindi_ocr_hf/finetune_hindi_ocr_hf.py
+    python3 training_scripts/gemma4_e2b/finetune_hindi_ocr_hf/finetune_hindi_ocr_hf.py --train-samples 64 --val-samples 8 --epochs 1   # smoke test
+    python3 training_scripts/gemma4_e2b/finetune_hindi_ocr_hf/finetune_hindi_ocr_hf.py --no-use-4bit --batch-size 16 --grad-accum 2    # big GPU
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 # Make the project root importable (bench_common lives there).
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import torch  # noqa: E402
 from datasets import Dataset  # noqa: E402

@@ -12,9 +12,8 @@ next to the predictions file. Failed samples are counted as errors and kept
 out of the averages, so model failures stay visible.
 
 Usage:
-    python3 evaluate.py                                  # score every model under benchmarks/results/
-    python3 evaluate.py benchmarks/results/gemma4_e2b   # one model, detailed view
-    python3 evaluate.py path/a.jsonl path/b.jsonl        # explicit files
+    python3 evaluate.py benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/results/gemma4_e2b_hf   # one run, detailed view
+    python3 evaluate.py results_dir_a results_dir_b                                     # several runs side by side
 """
 
 from __future__ import annotations
@@ -29,9 +28,6 @@ from pathlib import Path
 
 import regex
 from rapidfuzz.distance import Levenshtein
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-RESULTS_DIR = PROJECT_ROOT / "benchmarks" / "results"
 
 _WHITESPACE = re.compile(r"\s+")
 _GRAPHEME = regex.compile(r"\X")
@@ -224,33 +220,20 @@ def print_comparison(rows: list[tuple[str, dict]]) -> None:
         )
 
 
-def resolve_targets(args_targets: list[str]) -> list[tuple[str, Path]]:
-    """Turn CLI targets into (label, predictions-file) pairs.
+def resolve_targets(paths: list[Path]) -> list[tuple[str, Path]]:
+    """Turn explicit CLI targets into (label, predictions-file) pairs.
 
-    A target may be a predictions JSONL file or a directory containing one.
-    With no targets, every model directory under benchmarks/results/ that
-    holds predictions is scored.
+    A target is a results directory holding a predictions.jsonl, or a
+    predictions file directly. There are no defaults and no discovery --
+    what you pass is what gets scored.
     """
-    if args_targets:
-        resolved = []
-        for target in args_targets:
-            path = Path(target)
-            if path.is_dir():
-                path = path / "predictions.jsonl"
-            if not path.exists():
-                raise SystemExit(f"Predictions file not found: {path}")
-            label = path.parent.name if path.parent != RESULTS_DIR else path.stem
-            resolved.append((label, path))
-        return resolved
-
     resolved = []
-    for path in sorted(RESULTS_DIR.glob("*/predictions.jsonl")):
+    for path in paths:
+        if path.is_dir():
+            path = path / "predictions.jsonl"
+        if not path.exists():
+            raise SystemExit(f"Predictions file not found: {path}")
         resolved.append((path.parent.name, path))
-    if not resolved:
-        raise SystemExit(
-            f"No predictions found under {RESULTS_DIR}.\n"
-            "Run a benchmark script first, or pass a predictions file explicitly."
-        )
     return resolved
 
 
@@ -264,8 +247,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "targets",
-        nargs="*",
-        help="predictions file(s) or result directory(ies); default: every model under benchmarks/results/",
+        nargs="+",
+        type=Path,
+        help="results directory(ies) or predictions file(s) to score; required -- no discovery, no defaults",
     )
     return parser.parse_args()
 

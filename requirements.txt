@@ -1,67 +1,37 @@
-# Dependencies for the Devanagari OCR benchmark project.
+# Dependencies for the Devanagari OCR project.
 #
 # Install with:
 #     pip install -r requirements.txt
 #
-# Pinning policy: packages already installed in this environment (Python
-# 3.13, conda env "py313exp") are pinned to the exact versions verified to
-# work here. New packages are pinned to current stable PyPI releases.
-# Exact pins keep benchmark results reproducible across machines and time.
+# Pinning policy: exact pins keep results reproducible across machines and
+# time. Each benchmark/training script directory carries its own
+# requirements.txt for the libraries that script needs; this root file
+# covers the data pipeline, the shared evaluation, and the model runtime
+# common to every variant. Users manage their own environments -- these
+# files just describe runnable code.
 
 # ---------------------------------------------------------------------------
-# Dataset access and data handling
+# Data pipeline (download, extract, split)
 # ---------------------------------------------------------------------------
-huggingface_hub==1.33.0   # downloads the dataset (used by download_dataset.py)
-datasets==5.0.1           # HF datasets library; for future parquet-style data
-pillow==12.3.0            # loading and decoding the OCR images
-numpy==2.3.5              # arrays and image math
-pandas==3.0.6             # per-sample result tables and aggregation
-matplotlib==3.11.2        # benchmark charts
+huggingface_hub==1.33.0   # downloads the dataset (download_dataset.py)
 tqdm==4.70.1              # progress bars for long streaming scans
 
 # ---------------------------------------------------------------------------
-# OCR evaluation
+# Evaluation (evaluate.py)
 # ---------------------------------------------------------------------------
-jiwer==3.1.0              # CER / WER (edit-distance based). Pinned to the
-                          # stable 3.x line; 4.0.0 exists but is brand new.
-rapidfuzz==3.14.6         # fast edit distance, for the custom grapheme-level
-                          # CER that jiwer does not do out of the box
+rapidfuzz==3.14.6         # edit distances for CER and WER
 regex==2026.9.29          # \X grapheme-cluster segmentation, so Devanagari
                           # conjuncts count as a single character
-# evaluate                # optional: HF metric wrappers; their cer/wer are
-                          # jiwer-backed anyway, so we call jiwer directly
 
 # ---------------------------------------------------------------------------
-# Notebooks (benchmarks/<model>.ipynb)
-# ---------------------------------------------------------------------------
-jupyterlab==4.6.4         # notebook interface
-ipykernel==7.4.0          # kernel that runs notebooks inside this environment
-
-# ---------------------------------------------------------------------------
-# Model runtime
+# Shared model runtime (used by every benchmark/training variant)
 # ---------------------------------------------------------------------------
 # PyTorch with CUDA is already installed here as 2.13.0+cu132. On a fresh
 # machine, install it from the PyTorch wheel index (not PyPI), e.g.:
-#   pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu132
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu132
 torch==2.13.0
 torchvision==0.28.0
 torchaudio==2.11.0
-transformers==5.17.0      # TrOCR and other HF-hosted OCR models
+transformers==5.17.0      # model loading for every HF-based variant
 accelerate==1.15.0        # required by device_map="auto" model loading
-
-# ---------------------------------------------------------------------------
-# Fine-tuning (LoRA/QLoRA, pure transformers stack)
-# ---------------------------------------------------------------------------
-trl==1.16.0               # SFTTrainer: supervised fine-tuning with completion-only loss
-peft==0.21.2              # LoRA adapters
-bitsandbytes==0.50.2      # 4-bit NF4 quantization (USE_4BIT) and paged 8-bit AdamW
-
-# ---------------------------------------------------------------------------
-# Per-benchmark extras -- add each one here when its notebook lands.
-# Kept out until then: they pull heavy or conflicting dependencies.
-# ---------------------------------------------------------------------------
-# Tesseract (classical baseline): the engine is a SYSTEM package, not pip.
-# On Arch/Omarchy:  pacman -S tesseract tesseract-data-dev
-# pytesseract            # thin Python wrapper around the tesseract binary
-# easyocr                # self-contained OCR; brings its own torch flavor
-# paddleocr, paddlepaddle  # PaddleOCR stack; large install, may need own env
+pillow==12.3.0            # image decoding

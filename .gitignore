@@ -10,7 +10,7 @@ input/
 # Benchmark outputs: predictions and run info are regenerable by re-running
 # the model scripts and can grow to tens of MB per model per test run.
 # ---------------------------------------------------------------------------
-benchmarks/results/
+benchmarks/*/*/results/
 
 # ---------------------------------------------------------------------------
 # Python
@@ -38,7 +38,7 @@ venv/
 # Training artifacts: LoRA adapters and other outputs written by the training
 # scripts are multi-100MB weights -- they stay out of git.
 # ---------------------------------------------------------------------------
-training_scripts/*/outputs/
+training_scripts/*/*/outputs/
 checkpoints/
 runs/
 wandb/

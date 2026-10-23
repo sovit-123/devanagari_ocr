@@ -18,10 +18,6 @@ from pathlib import Path
 
 from make_splits import DEFAULT_DATA_DIR, iter_annotations
 
-# Benchmark outputs (predictions and run metadata) for every model land
-# under this directory, one subdirectory per model.
-RESULTS_DIR = Path(__file__).resolve().parent / "benchmarks" / "results"
-
 
 def load_test_split(data_dir: Path) -> list[str]:
     """Return the image paths of the test split, in the order splits.csv lists them.

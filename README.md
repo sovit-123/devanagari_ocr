@@ -35,15 +35,25 @@ admits JSON-referenced images, so orphans cost disk but nothing else.
 ```
 devanagari_ocr/
 ├── README.md                     # this file
-├── requirements.txt              # exact pins, tested on Python 3.13 + CUDA
+├── requirements.txt              # root pins: data pipeline, evaluation, shared runtime
 ├── .gitignore                    # dataset and results stay out of git
 ├── download_dataset.py           # fetch dataset files from Hugging Face
 ├── extract.py                    # unpack downloaded tarballs
 ├── make_splits.py                # create seeded train/val/test splits
 ├── bench_common.py               # shared benchmark machinery
+├── evaluate.py                   # shared scoring (grapheme CER, WER, exact match)
 ├── benchmarks/
-│   ├── benchmark_gemma4_e2b.py   # first model benchmark (Gemma 4 E2B)
-│   └── results/                  # per-model predictions + run info (git-ignored)
+│   └── gemma4_e2b/                        # one directory per model
+│       └── bench_gemma4_e2b_hf/            # one directory per library variant
+│           ├── bench_gemma4_e2b_hf.py     # pure-transformers benchmark
+│           ├── requirements.txt            # standalone pins for this script
+│           └── results/                   # per-run predictions (git-ignored)
+├── training_scripts/
+│   └── gemma4_e2b/                        # one directory per model
+│       └── finetune_hindi_ocr_hf/         # LoRA fine-tuning, pure transformers
+│           ├── finetune_hindi_ocr_hf.py
+│           ├── requirements.txt
+│           └── outputs/                   # trained adapters (git-ignored)
 └── input/                        # the dataset itself (git-ignored)
     └── devanagari_ocr_dataset/
         ├── devanagari_ocr.json  # annotations (~2.1 GB)
@@ -60,6 +70,12 @@ Python 3.13 with CUDA-enabled PyTorch (see the install note inside
 ```bash
 pip install -r requirements.txt
 ```
+
+Each benchmark/training script directory carries its own standalone
+`requirements.txt` pinned for that script's libraries (e.g. TRL/PEFT for
+fine-tuning); install that file alone if you only want one variant.
+Users manage their own environments -- the files just describe runnable
+code.
 
 Gated models (e.g. Gemma) additionally need license acceptance on the
 Hugging Face website and an authenticated session:
@@ -78,11 +94,16 @@ and only extracts/splits/predicts what is missing.
 | 1. Download | `python3 download_dataset.py --batches 1-5` | no flags = everything (~60 GB); `--only-annotations` = just the ~2.1 GB JSON |
 | 2. Extract | `python3 extract.py --batches 1-2` | no flags = every downloaded tarball; markers make it resumable, `--force` re-extracts |
 | 3. Split | `python3 make_splits.py` | 80/10/10, seed 42, over whatever is on disk; refuses to overwrite an existing split without `--force` |
-| 4. Benchmark | `python3 benchmarks/benchmark_gemma4_e2b.py` | test split only; resumable; `--limit N` for smoke tests |
-| 5. Evaluate | *(evaluation script -- planned)* | scores every model's predictions with one shared protocol |
+| 4. Benchmark | `python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py` | test split only; resumable; `--limit N`; `--finetuned <dir> --run-name <name>` for adapters/fine-tuned models |
+| 5. Evaluate | `python3 evaluate.py <results-dir>` | required path, no discovery; shared protocol: grapheme CER, WER, exact match, per-prefix breakdown |
 
 ## Design decisions
 
+- **One library, one script.** Each inference/fine-tuning library gets its
+  own script and requirements file under the model's directory, so users
+  run whichever stack fits their resources; results are always plain JSONL
+  with the same schema, so every variant scores through the same
+  evaluation.
 - **Split-first.** Benchmarks only ever score the `test` rows of
   `splits.csv`; there is no "score whatever is on disk" fallback, so
   numbers from different models are always comparable.
@@ -109,11 +130,13 @@ and only extracts/splits/predicts what is missing.
 
 - 2 of 42 batches downloaded and extracted; split covers the ~358k
   labeled samples on disk: **286,688 / 35,836 / 35,836** train/val/test
-- First benchmark (`google/gemma-4-E2B-it`, prompt
-  `"OCR this image without additional text"`) implemented and validated
-  up to model loading; blocked only on `accelerate` installation and
-  Hugging Face authentication
-- Evaluation script: next up
+- 500-sample pilot of the base model scored (3.4% exact match): ~31% of
+  predictions are English descriptions instead of transcriptions --
+  instruction-following, not recognition, is the bottleneck
+- Hindi LoRA fine-tuning script ready
+  (`training_scripts/gemma4_e2b/finetune_hindi_ocr_hf/`); first training
+  run pending, after which the benchmark's `--finetuned` flag gives the
+  official before/after numbers
 
 ## Hardware
 

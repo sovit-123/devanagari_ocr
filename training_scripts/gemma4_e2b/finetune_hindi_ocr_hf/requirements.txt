@@ -1,0 +1,13 @@
+# Requirements for finetune_hindi_ocr_hf.py (LoRA/QLoRA, pure transformers).
+# Standalone-complete: install this file alone into a fresh environment.
+#
+# PyTorch with CUDA is already installed here as 2.13.0+cu132. On a fresh
+# machine, install it from the PyTorch wheel index (not PyPI), e.g.:
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu132
+torch==2.13.0
+transformers==5.17.0      # AutoModelForMultimodalLM + AutoProcessor
+accelerate==1.15.0        # device_map="auto" model loading
+trl==1.16.0               # SFTTrainer: supervised fine-tuning, completion-only loss
+peft==0.21.2              # LoRA adapters
+bitsandbytes==0.50.2      # 4-bit NF4 quantization (--use-4bit) + paged 8-bit AdamW
+pillow==12.3.0            # image decoding
