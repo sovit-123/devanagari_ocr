@@ -207,26 +207,34 @@ def main() -> None:
     # prompt pads instead of the model's answer -- observed as 96% <pad>-only
     # predictions in a batch_size=64 run.
     # processor.tokenizer.padding_side = "left"
-    model = AutoModelForMultimodalLM.from_pretrained(
-        MODEL_ID,
-        dtype="auto",
-        device_map="auto",
-    )
+    if args.finetuned is None:
+        model = AutoModelForMultimodalLM.from_pretrained(
+            MODEL_ID,
+            dtype="auto",
+            device_map="auto",
+        )
 
     if args.finetuned is not None:
         if (args.finetuned / "adapter_config.json").exists():
-            from peft import PeftModel  # noqa: E402
-
-            print(f"Mounting LoRA adapter from {args.finetuned}")
-            model = PeftModel.from_pretrained(model, args.finetuned)
-        elif (args.finetuned / "config.json").exists():
             print(f"Loading fine-tuned model from {args.finetuned}")
             processor = AutoProcessor.from_pretrained(args.finetuned)
             model = AutoModelForMultimodalLM.from_pretrained(
                 args.finetuned,
                 dtype="auto",
-                device_map="auto",
+                device_map="cuda",
             )
+        # elif (args.finetuned / "config.json").exists():
+        #     from peft import PeftModel  # noqa: E402
+
+        #     print(f"Mounting LoRA adapter from {args.finetuned}")
+        #     model = PeftModel.from_pretrained(model, args.finetuned)
+            # print(f"Loading fine-tuned model from {args.finetuned}")
+            # processor = AutoProcessor.from_pretrained(args.finetuned)
+            # model = AutoModelForMultimodalLM.from_pretrained(
+                # args.finetuned,
+                # dtype="auto",
+                # device_map="auto",
+            # )
         else:
             raise SystemExit(
                 f"{args.finetuned} is neither an adapter (no adapter_config.json) "
@@ -337,6 +345,10 @@ def main() -> None:
                     except Exception as exc2:  # noqa: BLE001
                         records.append(error_record(path, exc2))
             for record in records:
+                # print(
+                #     f"{record['image_path']}: "
+                #     f"{'OK' if record['error'] is None else record['error']}"
+                # )
                 append_prediction(out_f, record)
                 out_f.flush()  # crash-safe: every record is on disk immediately
                 written += 1
