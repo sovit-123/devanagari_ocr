@@ -6,10 +6,12 @@ demo on validation samples. Training and benchmarking share one runtime, so
 the saved adapter plugs straight into the benchmark harness.
 
 --use-4bit (the default) trains on a 4-bit quantized base (QLoRA), which fits
-small GPUs; --no-use-4bit trains in full bf16 on a bigger one. The saved
-adapter is quantization-agnostic: it loads onto either base at any time, and
-official benchmarks always use the unquantized base to stay comparable with
-the existing pilot run.
+small GPUs; --no-use-4bit trains in full precision on a bigger one. The
+compute dtype is resolved once from --dtype: "auto" picks bf16 where the GPU
+supports it and fp16 otherwise (T4-class cards have no bf16 compute). The
+saved adapter is quantization-agnostic: it loads onto either base at any
+time, and official benchmarks always use the unquantized base to stay
+comparable with the existing pilot run.
 
 Usage:
     python3 training_scripts/gemma4_e2b/finetune_hindi_ocr_hf/finetune_hindi_ocr_hf.py
@@ -91,7 +93,16 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="train on a 4-bit NF4 base (QLoRA, fits 8 GB GPUs); "
-        "--no-use-4bit trains in bf16 (default: %(default)s)",
+        "--no-use-4bit trains in full precision (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["auto", "bf16", "fp16", "fp32"],
+        default="auto",
+        help=(
+            "compute dtype: auto picks bf16 when the GPU supports it and fp16 "
+            "otherwise (e.g. T4); explicit values force it (default: %(default)s)"
+        ),
     )
     parser.add_argument("--epochs", type=int, default=3, help="training epochs (default: %(default)s)")
     parser.add_argument(
@@ -216,16 +227,42 @@ def demo(args, model, processor, image_paths: list[str], truth: dict[str, str]) 
         print(f"{path}\n  gt  : {truth[path]}\n  pred: {prediction}\n")
 
 
-def print_config(args) -> None:
+def resolve_dtype(choice: str):
+    """Turn the --dtype choice into a torch dtype.
+
+    "auto" picks bf16 when the GPU (and the CUDA build) supports it and
+    falls back to fp16 otherwise -- T4-class cards have no bf16 compute.
+    """
+    if choice == "bf16":
+        return torch.bfloat16
+    if choice == "fp16":
+        return torch.float16
+    if choice == "fp32":
+        return torch.float32
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def print_config(args, dtype) -> None:
     """Echo the whole run configuration before anything heavy starts, so the
     user can see every decision the flags resolved to."""
-    quantization = "4-bit NF4 (QLoRA)" if args.use_4bit else "bf16 (LoRA)"
+    d = str(dtype).replace("torch.", "")
+    if args.dtype == "auto":
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no CUDA device"
+        source = f"auto -- detected {gpu}"
+    else:
+        source = "forced"
+    if args.use_4bit:
+        precision = f"4-bit NF4 (QLoRA), compute {d} ({source})"
+    else:
+        precision = f"{d} (LoRA) ({source})"
     line = "-" * 64
     print(line)
     print("Fine-tuning Gemma 4 E2B for Hindi Devanagari OCR")
     print(line)
     print(f"Model          : {args.model_id}")
-    print(f"Precision      : {quantization}")
+    print(f"Precision      : {precision}")
     print(f"Data dir       : {args.data_dir}")
     print(f"Hindi prefixes : {', '.join(args.hindi_prefixes)}")
     print(f"Samples        : {args.train_samples} train / {args.val_samples} val (seed {args.seed})")
@@ -245,7 +282,8 @@ def print_config(args) -> None:
 
 def main() -> None:
     args = parse_args()
-    print_config(args)
+    dtype = resolve_dtype(args.dtype)
+    print_config(args, dtype)
 
     # --- Data preparation ---
     train_paths = select_samples(args, "train", args.train_samples)
@@ -264,10 +302,10 @@ def main() -> None:
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=dtype,
         )
     else:
-        model_kwargs["dtype"] = torch.bfloat16
+        model_kwargs["dtype"] = dtype
 
     model = AutoModelForMultimodalLM.from_pretrained(args.model_id, **model_kwargs)
     model.config.use_cache = False
@@ -296,7 +334,8 @@ def main() -> None:
         eval_steps=args.eval_steps,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        bf16=True,
+        bf16=dtype == torch.bfloat16,
+        fp16=dtype == torch.float16,
         max_length=args.max_length,
         packing=False,
         completion_only_loss=True,
