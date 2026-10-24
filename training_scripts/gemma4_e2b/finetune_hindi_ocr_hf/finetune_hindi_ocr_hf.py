@@ -297,15 +297,18 @@ def main() -> None:
 
     # --- Model preparation ---
     processor = AutoProcessor.from_pretrained(args.model_id)
-    model_kwargs = {"device_map": "auto"}
+    # The load dtype covers the non-quantized modules in the 4-bit case (the
+    # standard QLoRA recipe: one dtype everywhere) and the whole model in the
+    # plain-LoRA case, so gradients always match the trainer's fp16/bf16
+    # setting -- mismatched dtypes crash the fp16 gradient scaler with
+    # "_amp_foreach_non_finite_check_and_unscale_cuda not implemented for BFloat16".
+    model_kwargs = {"device_map": "auto", "dtype": dtype}
     if args.use_4bit:
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=dtype,
         )
-    else:
-        model_kwargs["dtype"] = dtype
 
     model = AutoModelForMultimodalLM.from_pretrained(args.model_id, **model_kwargs)
     model.config.use_cache = False
