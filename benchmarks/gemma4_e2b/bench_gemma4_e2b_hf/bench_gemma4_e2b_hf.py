@@ -11,33 +11,35 @@ sample and completed samples are skipped on restart. The model repository
 is gated: accept its license on the Hugging Face website and log in
 (hf auth login) before the first run downloads the weights.
 
---finetuned PATH loads either a LoRA/QLoRA adapter (mounted on the
-unquantized base model) or a fully fine-tuned model directory; --run-name
-names the results directory and is required whenever --finetuned is given.
-Benchmarks always run the unquantized base to stay comparable.
+--finetuned PATH loads either a LoRA adapter or a fully fine-tuned model
+directory; --run-name names the results directory and is required whenever
+--finetuned is given. Adapters load their recorded base and trained weights
+on CPU first, then dispatch the complete model so offload hooks include LoRA.
+Use --debug to stop on the first inference failure with its full traceback.
+Use --device-map cuda:0 only if the whole model and inference working memory
+fit on that GPU. For adapters, auto uses GPU 0 plus CPU offloading, with a
+GPU placement budget of at most 6 GiB and enough host RAM for CPU assembly.
+Base and full-model checkpoints retain ordinary device_map="auto" loading.
 
 Usage:
-    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py
-    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --limit 200     # smoke test
-    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --batch-size 8  # batched inference
-    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --finetuned <dir> --run-name <name>
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --batch-size 1 --prompt "Do OCR on this image without additional text. Just the text in the image and nothing else."
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --batch-size 1 --limit 200 --prompt "Do OCR on this image without additional text. Just the text in the image and nothing else."    # smoke test
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --batch-size 8 --prompt "Do OCR on this image without additional text. Just the text in the image and nothing else."  # batched inference
+    python3 benchmarks/gemma4_e2b/bench_gemma4_e2b_hf/bench_gemma4_e2b_hf.py --prompt "Do OCR on this image without additional text. Just the text in the image and nothing else." --finetuned <dir> --run-name <name>
 """
 
 from __future__ import annotations
 
 import os
 
-# The model's vision tower allocates multi-GB transients for every image
-# (a fixed 2520-patch representation, regardless of image size). On an
-# 8 GB GPU those repeated large allocations fragment the CUDA caching
-# allocator; expandable_segments avoids exactly that (it is also what
-# PyTorch's own out-of-memory message recommends). Must be set before
-# torch initializes CUDA -- torch is imported later, inside main().
+# Can reduce allocator fragmentation across repeated image batches.
+# Must be set before torch initializes CUDA; torch is imported in main().
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
+from importlib.metadata import PackageNotFoundError, version  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 # Make the project root importable (bench_common and make_splits live there).
@@ -60,8 +62,8 @@ DEFAULT_PROMPT = "OCR this image without additional text"
 DEFAULT_MAX_NEW_TOKENS = 512
 
 # If this many samples fail in a row, something is systematically wrong
-# (auth, prompt format, out-of-memory) -- stop rather than writing an
-# error record for the entire test split.
+# (model loading, device placement, prompt format, out-of-memory) -- stop
+# rather than writing an error record for the entire test split.
 MAX_CONSECUTIVE_FAILURES = 5
 
 
@@ -152,6 +154,28 @@ def parse_args() -> argparse.Namespace:
             f'(default for plain runs: "{DEFAULT_RUN_NAME}"; required with --finetuned)'
         ),
     )
+    parser.add_argument(
+        "--device-map",
+        default="auto",
+        help=(
+            "auto (default), cpu, or a CUDA device such as cuda:0. A fixed CUDA "
+            "device disables offload and requires enough VRAM. Adapter auto "
+            "uses GPU 0 plus CPU, with a GPU placement budget of at most 6 GiB"
+        ),
+    )
+    parser.add_argument(
+        "--processor",
+        default=None,
+        help=(
+            "processor/tokenizer directory or Hub ID; by default use saved "
+            "processor files in --finetuned when present, otherwise the base"
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="stop on the first inference error with a full traceback, without recording that failure",
+    )
     args = parser.parse_args()
 
     if args.limit is not None and args.limit < 1:
@@ -169,6 +193,238 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def package_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "not installed"
+
+
+def load_adapter_for_inference(adapter_dir: Path, requested_device_map):
+    """Assemble base plus adapter on CPU, then dispatch the complete model."""
+    import torch
+    from accelerate import dispatch_model, infer_auto_device_map
+    from peft.tuners.tuners_utils import BaseTunerLayer
+    from transformers import AutoModelForMultimodalLM
+
+    max_memory = None
+    if requested_device_map == "auto" and torch.cuda.is_available():
+        import psutil
+
+        input_device = torch.device("cuda:0")
+        # Capture host availability before the full CPU model consumes RAM.
+        free_gpu, _ = torch.cuda.mem_get_info(0)
+        max_memory = {
+            0: min(6 * 1024**3, int(free_gpu * 0.8)),
+            "cpu": int(psutil.virtual_memory().available * 0.8),
+        }
+    elif requested_device_map == "auto":
+        input_device = torch.device("cpu")
+    else:
+        input_device = torch.device(requested_device_map[""])
+
+    print(f"Assembling base model and adapter on CPU: {adapter_dir}")
+    # Transformers reads adapter_config.json and loads its recorded base.
+    # No GPU offload hooks are installed before the LoRA modules exist.
+    model = AutoModelForMultimodalLM.from_pretrained(
+        str(adapter_dir),
+        dtype="auto",
+        device_map={"": "cpu"},
+    )
+
+    non_cpu = [
+        (name, str(tensor.device))
+        for name, tensor in (
+            list(model.named_parameters()) + list(model.named_buffers())
+        )
+        if tensor.device.type != "cpu"
+    ]
+    if non_cpu:
+        raise RuntimeError(
+            f"CPU loading left unexpected devices: {non_cpu[:20]}"
+        )
+
+    adapter_layers = [
+        module for module in model.modules() if isinstance(module, BaseTunerLayer)
+    ]
+    if not adapter_layers:
+        raise RuntimeError("No adapter layers were loaded.")
+
+    if max_memory is not None:
+        no_split = set(getattr(model, "_no_split_modules", None) or [])
+        no_split.update(type(module).__name__ for module in adapter_layers)
+        device_map = infer_auto_device_map(
+            model,
+            max_memory=max_memory,
+            no_split_module_classes=sorted(no_split),
+            offload_buffers=False,
+        )
+        if "disk" in device_map.values():
+            raise RuntimeError(
+                "The selected GPU/CPU memory budgets require disk offload. "
+                "This adapter loading route needs enough system RAM for the "
+                "full model and does not configure disk offload."
+            )
+    else:
+        # Preserve explicit CPU / whole-GPU placement and CPU-only auto runs.
+        device_map = {"": str(input_device)}
+
+    if input_device.type != "cpu":
+        model = dispatch_model(
+            model,
+            device_map=device_map,
+            main_device=input_device,
+            skip_keys=getattr(model, "_skip_keys_device_placement", None),
+            offload_buffers=False,
+            force_hooks=True,
+        )
+    model.eval()
+    print(f"Adapter layers: {len(adapter_layers)}")
+    if max_memory is not None:
+        print(f"Placement memory budgets (bytes): {max_memory}")
+    # Keep this execution device even when every weight is stored on CPU.
+    return model, input_device, max_memory
+
+
+def load_model_and_processor(args: argparse.Namespace):
+    """Select the checkpoint type before loading exactly one base model."""
+    import torch
+    from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+    if args.device_map == "auto":
+        device_map = "auto"
+    else:
+        target = torch.device(args.device_map)
+        if target.type not in {"cpu", "cuda"}:
+            raise SystemExit("--device-map must be auto, cpu, or a CUDA device such as cuda:0")
+        if target.type == "cuda" and not torch.cuda.is_available():
+            raise SystemExit("A CUDA device was requested, but CUDA is unavailable.")
+        device_map = {"": str(target)}
+
+    finetuned = args.finetuned.resolve() if args.finetuned is not None else None
+    is_adapter = finetuned is not None and (finetuned / "adapter_config.json").is_file()
+    if finetuned is None:
+        checkpoint_kind = "base"
+        model_source = MODEL_ID
+    elif is_adapter:
+        checkpoint_kind = "adapter"
+        model_source = str(finetuned)
+    elif (finetuned / "config.json").is_file():
+        checkpoint_kind = "full_model"
+        model_source = str(finetuned)
+    else:
+        raise SystemExit(
+            f"{finetuned} is neither an adapter (no adapter_config.json) "
+            "nor a model directory (no config.json)."
+        )
+
+    processor_files = (
+        "processor_config.json",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "chat_template.json",
+    )
+    if args.processor is not None:
+        processor_source = args.processor
+    elif finetuned is not None and any((finetuned / name).is_file() for name in processor_files):
+        processor_source = str(finetuned)
+    else:
+        processor_source = MODEL_ID
+        if finetuned is not None:
+            print(
+                "No saved processor/tokenizer files found in the checkpoint; "
+                f"using {MODEL_ID}. Use --processor if training changed them."
+            )
+
+    print(f"Loading processor from {processor_source}")
+    # Do not silently replace a saved but incomplete processor with the base:
+    # changed tokens, templates, or image preprocessing must be preserved.
+    processor = AutoProcessor.from_pretrained(processor_source)
+    processor.tokenizer.padding_side = "left"
+
+    adapter_base_reference = None
+    if is_adapter:
+        from peft import PeftConfig
+
+        peft_config = PeftConfig.from_pretrained(str(finetuned))
+        adapter_base_reference = peft_config.base_model_name_or_path
+        print(f"Adapter's recorded training base: {adapter_base_reference}")
+
+    print(f"Loading {checkpoint_kind}: {model_source}, device_map={device_map}")
+    input_device = None
+    max_memory = None
+    if is_adapter:
+        model, input_device, max_memory = load_adapter_for_inference(
+            finetuned, device_map
+        )
+    else:
+        model = AutoModelForMultimodalLM.from_pretrained(
+            model_source,
+            dtype="auto",
+            device_map=device_map,
+        )
+    model.eval()
+
+    hf_device_map = getattr(model, "hf_device_map", None) or {}
+    meta_parameters = [name for name, tensor in model.named_parameters() if tensor.is_meta]
+    meta_buffers = [name for name, tensor in model.named_buffers() if tensor.is_meta]
+    print(f"hf_device_map: {hf_device_map}")
+    for label, names in (("parameters", meta_parameters), ("buffers", meta_buffers)):
+        print(f"Meta {label}: {len(names)}")
+        for name in names[:30]:
+            print(f"  {name}")
+        if len(names) > 30:
+            print(f"  ... and {len(names) - 30} more")
+    if meta_parameters or meta_buffers:
+        print(
+            "Meta tensors can be normal with Accelerate CPU/disk offloading; "
+            "they must be materialized before the operations that use them. "
+            "Use --debug to locate any failing operation."
+        )
+
+    # Adapter dispatch supplies its execution device explicitly. Infer it
+    # only for the ordinary base/full-model loading branches.
+    if input_device is None:
+        for mapped_device in hf_device_map.values():
+            if isinstance(mapped_device, int):
+                input_device = torch.device("cuda", mapped_device)
+                break
+            if str(mapped_device) not in {"cpu", "disk", "meta"}:
+                input_device = torch.device(mapped_device)
+                break
+    if input_device is None:
+        reported_device = getattr(model, "device", torch.device("cpu"))
+        if reported_device.type != "meta":
+            input_device = reported_device
+        elif hf_device_map and all(str(d) in {"cpu", "disk"} for d in hf_device_map.values()):
+            input_device = torch.device("cpu")
+        else:
+            raise RuntimeError(
+                "The model reports a meta input device without a usable offload map. "
+                "Check the checkpoint and the model-loading warnings."
+            )
+    print(f"Input device: {input_device}")
+
+    load_info = {
+        "checkpoint_kind": checkpoint_kind,
+        "model_source": model_source,
+        "adapter_base_reference": adapter_base_reference,
+        "processor_source": processor_source,
+        "device_map_requested": args.device_map,
+        "loading_strategy": "cpu_then_dispatch" if is_adapter else "from_pretrained",
+        "placement_memory_budget_bytes": (
+            {str(key): value for key, value in max_memory.items()}
+            if max_memory is not None else None
+        ),
+        "hf_device_map": {key: str(value) for key, value in hf_device_map.items()},
+        "input_device": str(input_device),
+        "meta_parameter_count": len(meta_parameters),
+        "meta_buffer_count": len(meta_buffers),
+    }
+    return model, processor, input_device, load_info
+
+
 def main() -> None:
     args = parse_args()
     data_dir: Path = args.data_dir.resolve()
@@ -179,7 +435,7 @@ def main() -> None:
         test_paths = test_paths[: args.limit]
     print(f"Test samples selected: {len(test_paths):,}")
 
-    # 2. Ground truth for those samples (streams the 2.1 GB annotations once).
+    # 2. Ground truth for those samples (streams the annotations once).
     print("Streaming annotations for ground truth ...")
     truth = collect_ground_truth(data_dir, test_paths)
 
@@ -197,41 +453,11 @@ def main() -> None:
     # Import the heavy libraries only after the cheap checks have passed.
     import torch  # noqa: E402
     import transformers  # noqa: E402
-    from transformers import AutoModelForMultimodalLM, AutoProcessor  # noqa: E402
-
-    print(f"Loading {MODEL_ID} (first run downloads the weights)...")
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    # Batched generation requires LEFT padding. With the right padding some
-    # tokenizers default to, pad tokens land BETWEEN each row's prompt and its
-    # generated text, and slicing the response from the padded length returns
-    # prompt pads instead of the model's answer -- observed as 96% <pad>-only
-    # predictions in a batch_size=64 run.
-    # processor.tokenizer.padding_side = "left"
-    model = AutoModelForMultimodalLM.from_pretrained(
-        MODEL_ID,
-        dtype="auto",
-        device_map="auto",
+    print(
+        f"Versions: torch={torch.__version__}, transformers={transformers.__version__}, "
+        f"peft={package_version('peft')}, accelerate={package_version('accelerate')}"
     )
-
-    if args.finetuned is not None:
-        if (args.finetuned / "adapter_config.json").exists():
-            from peft import PeftModel  # noqa: E402
-
-            print(f"Mounting LoRA adapter from {args.finetuned}")
-            model = PeftModel.from_pretrained(model, args.finetuned)
-        elif (args.finetuned / "config.json").exists():
-            print(f"Loading fine-tuned model from {args.finetuned}")
-            processor = AutoProcessor.from_pretrained(args.finetuned)
-            model = AutoModelForMultimodalLM.from_pretrained(
-                args.finetuned,
-                dtype="auto",
-                device_map="auto",
-            )
-        else:
-            raise SystemExit(
-                f"{args.finetuned} is neither an adapter (no adapter_config.json) "
-                "nor a model directory (no config.json)."
-            )
+    model, processor, input_device, load_info = load_model_and_processor(args)
 
     write_run_info(
         run_dir,
@@ -249,14 +475,18 @@ def main() -> None:
             "samples_to_run": len(todo),
             "transformers_version": transformers.__version__,
             "torch_version": torch.__version__,
-            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+            "peft_version": package_version("peft"),
+            "accelerate_version": package_version("accelerate"),
+            "device": (
+                torch.cuda.get_device_name(input_device)
+                if input_device.type == "cuda"
+                else str(input_device)
+            ),
+            **load_info,
         },
     )
 
-    # Inner worker: run the model on a chunk of samples -- one conversation
-    # each, padded together -- and return one record per sample. Raises
-    # whole-chunk exceptions (for example out-of-memory) for the caller to
-    # retry sample by sample.
+    # Run one conversation per image, padded together for generation.
     def predict_batch(chunk: list[str]) -> list[dict]:
         messages = [
             [
@@ -275,13 +505,14 @@ def main() -> None:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            # padding=True,
+            padding=True,
             add_generation_prompt=True,
-        ).to(model.device)
+        ).to(input_device)
         prompt_len = inputs["input_ids"].shape[-1]
 
         start = time.perf_counter()
-        outputs = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+        with torch.inference_mode():
+            outputs = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
         elapsed = time.perf_counter() - start
 
         responses = [
@@ -323,13 +554,16 @@ def main() -> None:
             try:
                 records = predict_batch(chunk)
             except Exception as exc:  # noqa: BLE001 -- a batch-level failure
-                # (typically out-of-memory, or one poison image) is retried
-                # one sample at a time to isolate the culprit.
+                if args.debug:
+                    # Re-raise preserves the full traceback and avoids writing
+                    # a failed prediction for a systematic loading problem.
+                    raise
+                # Retry a failed batch sample by sample to isolate the culprit.
                 print(
-                    f"Batch of {len(chunk)} failed ({type(exc).__name__}); "
+                    f"Batch of {len(chunk)} failed ({type(exc).__name__}: {exc}); "
                     "retrying its samples individually ..."
                 )
-                torch.cuda.empty_cache()  # release the failed attempt's reserved memory
+                torch.cuda.empty_cache()  # release unused cached GPU allocations
                 records = []
                 for path in chunk:
                     try:
@@ -337,6 +571,10 @@ def main() -> None:
                     except Exception as exc2:  # noqa: BLE001
                         records.append(error_record(path, exc2))
             for record in records:
+                # print(
+                #     f"{record['image_path']}: "
+                #     f"{'OK' if record['error'] is None else record['error']}"
+                # )
                 append_prediction(out_f, record)
                 out_f.flush()  # crash-safe: every record is on disk immediately
                 written += 1
@@ -347,12 +585,11 @@ def main() -> None:
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         raise SystemExit(
                             f"{MAX_CONSECUTIVE_FAILURES} samples failed in a row -- something "
-                            "is systematically wrong (auth, prompt format, or out-of-memory). "
-                            "Stopping."
+                            "is systematically wrong (model loading/device placement, "
+                            "prompt format, or out-of-memory). "
+                            "Stopping. Re-run with --debug and a fresh --run-name for a traceback."
                         )
-            # The vision tower's multi-GB transients are per-image; freeing
-            # the cached blocks keeps the next batch from fragmenting the
-            # small GPU. Cheap insurance (a few milliseconds per batch).
+            # Preserve the original benchmark's between-batch cache cleanup.
             torch.cuda.empty_cache()
 
     print(f"Wrote {written:,} prediction record(s) to {pred_path}")
