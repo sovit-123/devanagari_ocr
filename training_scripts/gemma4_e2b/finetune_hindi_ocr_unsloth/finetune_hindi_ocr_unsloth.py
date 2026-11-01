@@ -30,10 +30,11 @@ from pathlib import Path
 # Make the project root importable (bench_common lives there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from transformers import TextStreamer
-from trl import SFTConfig, SFTTrainer
 from unsloth import FastVisionModel
 from unsloth.trainer import UnslothVisionDataCollator
+
+from transformers import TextStreamer
+from trl import SFTConfig, SFTTrainer
 
 from bench_common import DEFAULT_DATA_DIR, collect_ground_truth
 
