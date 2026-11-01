@@ -24,10 +24,14 @@ import argparse
 import csv
 import random
 import sys
+import os
 from pathlib import Path
 
 # Make the project root importable (bench_common lives there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+# Force Unsloth to return actual logits.
+os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
 
 from transformers import TextStreamer
 from trl import SFTConfig, SFTTrainer
