@@ -3,14 +3,21 @@
 #
 # NOTE: pins transformers 5.5.0 per the reference article -- do NOT install
 # this into an environment that also hosts the pure-transformers scripts
-# (they need transformers 5.17.0). Unsloth pulls compatible trl/peft/
-# bitsandbytes versions as its own dependencies.
+# (they need transformers 5.17.0).
+#
+# trl is pinned BELOW unsloth's ceiling on purpose: unsloth 2026.4.8 allows
+# trl<=0.24.0, but 0.24.0's token-entropy computation in compute_loss reads
+# outputs.logits as a tensor, which transformers 5.5.0's multimodal outputs
+# expose as a callable -- training dies on the very first step with
+# "'function' object is not subscriptable". trl 0.23.1 is the newest allowed
+# version without that code path. peft/bitsandbytes stay on unsloth's own
+# dependency resolution.
 unsloth==2026.4.8
 unsloth-zoo==2026.4.9
 pandas==2.3.3
 matplotlib==3.10.9
 openpyxl==3.1.5
 transformers==5.5.0
-trl==0.24.0
+trl==0.23.1
 accelerate==1.14.0
 tqdm==4.70.1              # used by the shared bench_common/make_splits machinery
