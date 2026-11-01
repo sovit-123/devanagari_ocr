@@ -23,7 +23,7 @@ import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 # The batch-spec syntax and tarball naming rules live with the downloader,
 # which owns the description of the repository layout.

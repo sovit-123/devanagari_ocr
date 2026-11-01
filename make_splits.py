@@ -25,7 +25,7 @@ import json
 import random
 from pathlib import Path
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = PROJECT_ROOT / "input" / "devanagari_ocr_dataset"

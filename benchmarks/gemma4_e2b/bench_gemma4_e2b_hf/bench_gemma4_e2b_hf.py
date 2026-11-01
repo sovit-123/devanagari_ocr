@@ -45,7 +45,7 @@ from pathlib import Path  # noqa: E402
 # Make the project root importable (bench_common and make_splits live there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from bench_common import (
     DEFAULT_DATA_DIR,
