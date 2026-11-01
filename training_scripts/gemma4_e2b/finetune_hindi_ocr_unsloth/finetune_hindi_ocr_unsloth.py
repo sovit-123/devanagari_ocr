@@ -30,9 +30,6 @@ from pathlib import Path
 # Make the project root importable (bench_common lives there).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-# Force Unsloth to return actual logits.
-os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
-
 from transformers import TextStreamer
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastVisionModel
@@ -313,6 +310,9 @@ def main() -> None:
     trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
     print(f"Trainable LoRA parameters: {trainable:,}")
 
+
+    # Force Unsloth to return actual logits.
+    os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
     trainer.train()
 
     # --- Save the adapter ---
