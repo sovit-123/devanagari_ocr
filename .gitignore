@@ -43,3 +43,4 @@ checkpoints/
 runs/
 wandb/
 mlruns/
+unsloth_compiled_cache/
